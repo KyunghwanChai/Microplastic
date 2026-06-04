@@ -1,0 +1,122 @@
+clear; clc; close all;
+
+filename = "Microplastic.csv";
+tbl = readtable(filename);
+
+featureVarNames = tbl.Properties.VariableNames(1:end-2);
+patientVarName  = tbl.Properties.VariableNames{end-1};
+labelVarName    = tbl.Properties.VariableNames{end};
+
+X_raw      = tbl{:, featureVarNames};
+patientIDs = tbl{:, patientVarName};
+Y          = tbl{:, labelVarName};
+
+if iscell(Y) || iscategorical(Y)
+    Y = grp2idx(Y);
+end
+Y          = categorical(Y);
+numClasses = numel(categories(Y));
+
+K           = 5;
+uniquePatients = unique(patientIDs);
+numPatients    = numel(uniquePatients);
+
+rng(1);
+shuffledIdx = randperm(numPatients);
+foldSize    = floor(numPatients / K);
+
+testAcc_all    = zeros(K, 1);
+all_Y_test     = [];
+all_YPred_test = [];
+
+for k = 1:K
+    fprintf('\n================ Fold %d ================\n', k);
+
+    if k < K
+        testPatients = uniquePatients(shuffledIdx((k-1)*foldSize+1 : k*foldSize));
+    else
+        testPatients = uniquePatients(shuffledIdx((k-1)*foldSize+1 : end));
+    end
+
+    trainvalPatients = setdiff(uniquePatients, testPatients);
+    numTrainVal      = numel(trainvalPatients);
+
+    rng(k);
+    valIdx       = randperm(numTrainVal, round(0.2 * numTrainVal));
+    valPatients  = trainvalPatients(valIdx);
+    trainPatients = setdiff(trainvalPatients, valPatients);
+
+    train_mask = ismember(patientIDs, trainPatients);
+    val_mask   = ismember(patientIDs, valPatients);
+    test_mask  = ismember(patientIDs, testPatients);
+
+    X_train_raw = X_raw(train_mask, :);
+    Y_train     = Y(train_mask);
+    X_val_raw   = X_raw(val_mask,   :);
+    Y_val       = Y(val_mask);
+    X_test_raw  = X_raw(test_mask,  :);
+    Y_test      = Y(test_mask);
+
+    window      = 50;
+    X_train_bc  = X_train_raw - movmean(X_train_raw, window, 2);
+    X_val_bc    = X_val_raw   - movmean(X_val_raw,   window, 2);
+    X_test_bc   = X_test_raw  - movmean(X_test_raw,  window, 2);
+
+    X_train_proc = log1p(sgolayfilt(X_train_bc, 3, 11));
+    X_val_proc   = log1p(sgolayfilt(X_val_bc,   3, 11));
+    X_test_proc  = log1p(sgolayfilt(X_test_bc,  3, 11));
+
+    [X_train_final, mu, sigma] = zscore(X_train_proc);
+    sigma(sigma == 0) = 1;
+    X_val_final  = (X_val_proc  - mu) ./ sigma;
+    X_test_final = (X_test_proc - mu) ./ sigma;
+
+    layers = [
+        featureInputLayer(size(X_train_final, 2))
+        fullyConnectedLayer(256)
+        batchNormalizationLayer
+        reluLayer
+        dropoutLayer(0.5)
+        fullyConnectedLayer(128)
+        batchNormalizationLayer
+        reluLayer
+        dropoutLayer(0.5)
+        fullyConnectedLayer(64)
+        reluLayer
+        fullyConnectedLayer(numClasses)
+        softmaxLayer
+        classificationLayer
+    ];
+
+    options = trainingOptions('adam', ...
+        'MaxEpochs',           40,   ...
+        'MiniBatchSize',       64,   ...
+        'Shuffle',             'every-epoch', ...
+        'ValidationData',      {X_val_final, Y_val}, ...
+        'ValidationFrequency', 10,  ...
+        'ValidationPatience',  5,   ...
+        'Plots',               'training-progress', ...
+        'Verbose',             false);
+
+    net        = trainNetwork(X_train_final, Y_train, layers, options);
+    YPred_test = classify(net, X_test_final);
+    acc        = mean(YPred_test == Y_test) * 100;
+
+    fprintf('Fold %d Test Accuracy: %.2f%%\n', k, acc);
+    testAcc_all(k) = acc;
+
+    figure;
+    confusionchart(Y_test, YPred_test);
+    title(sprintf('Fold %d Confusion Matrix', k));
+
+    all_Y_test     = [all_Y_test;     Y_test];
+    all_YPred_test = [all_YPred_test; YPred_test];
+end
+
+fprintf('\n================ Results ================\n');
+fprintf('Mean Accuracy : %.2f%%\n', mean(testAcc_all));
+fprintf('Std Deviation : %.2f%%\n', std(testAcc_all));
+
+figure;
+confusionchart(all_Y_test, all_YPred_test);
+title('Overall Confusion Matrix (K-Fold)');
