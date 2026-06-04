@@ -1,6 +1,6 @@
 clear; clc; close all;
 
-filename = "Random_PS_PMMA_PLA.csv";
+filename = "Microplastic.csv";
 tbl = readtable(filename);
 
 featureVarNames = tbl.Properties.VariableNames(1:end-1);
