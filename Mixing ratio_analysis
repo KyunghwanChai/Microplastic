@@ -1,0 +1,109 @@
+clear; clc; close all;
+
+%% 1. Load Data
+tbl = readtable("Mixing ratio.csv");
+X_raw = tbl{:, 1:end-1};
+Y     = tbl{:, end};
+
+%% 2. Extract Raman Shift from Column Names
+rawNames    = tbl.Properties.VariableNames(1:end-1);
+ramanShifts = zeros(1, numel(rawNames));
+for i = 1:numel(rawNames)
+    val = regexp(rawNames{i}, '\d+\.?\d*', 'match');
+    if ~isempty(val)
+        ramanShifts(i) = str2double(val{1});
+    else
+        ramanShifts(i) = NaN;
+    end
+end
+
+validIdx    = ~isnan(ramanShifts);
+ramanShifts = ramanShifts(validIdx);
+X           = X_raw(:, validIdx);
+
+%% 3. K-Fold Cross Validation
+K  = 5;
+cv = cvpartition(numel(Y), 'KFold', K);
+
+all_Y_test    = [];
+all_Y_pred    = [];
+RMSE_all      = zeros(K, 1);
+MAE_all       = zeros(K, 1);
+R2_all        = zeros(K, 1);
+
+for k = 1:K
+    fprintf('\n================ Fold %d ================\n', k);
+
+    train_idx = training(cv, k);
+    test_idx  = test(cv, k);
+
+    X_train = X(train_idx, :);
+    Y_train = Y(train_idx);
+    X_test  = X(test_idx,  :);
+    Y_test  = Y(test_idx);
+
+    %% 4. Normalization (fit on train only)
+    [X_train_final, mu, sigma] = zscore(X_train);
+    sigma(sigma == 0) = 1;
+    X_test_final = (X_test - mu) ./ sigma;
+
+    %% 5. Train Random Forest
+    rfModel = TreeBagger(510, X_train_final, Y_train, ...
+        'Method',                 'regression', ...
+        'OOBPrediction',          'on', ...
+        'OOBPredictorImportance', 'on', ...
+        'MinLeafSize',            5);
+
+    %% 6. Predict
+    Y_pred = predict(rfModel, X_test_final);
+
+    %% 7. Evaluate
+    errors    = Y_pred - Y_test;
+    RMSE_all(k) = sqrt(mean(errors.^2));
+    MAE_all(k)  = mean(abs(errors));
+    SS_res      = sum((Y_test - Y_pred).^2);
+    SS_tot      = sum((Y_test - mean(Y_test)).^2);
+    R2_all(k)   = 1 - SS_res / SS_tot;
+
+    fprintf('Fold %d  RMSE: %.4f  MAE: %.4f  R2: %.4f\n', ...
+        k, RMSE_all(k), MAE_all(k), R2_all(k));
+
+    all_Y_test = [all_Y_test; Y_test];
+    all_Y_pred = [all_Y_pred; Y_pred];
+end
+
+%% 8. Final Results
+fprintf('\n================ Results ================\n');
+fprintf('Mean RMSE : %.4f +/- %.4f\n', mean(RMSE_all), std(RMSE_all));
+fprintf('Mean MAE  : %.4f +/- %.4f\n', mean(MAE_all),  std(MAE_all));
+fprintf('Mean R2   : %.4f +/- %.4f\n', mean(R2_all),   std(R2_all));
+
+%% 9. Feature Importance (final fold only)
+importance = rfModel.OOBPermutedPredictorDeltaError;
+
+figure;
+plot(ramanShifts, importance, 'LineWidth', 2);
+xlabel('Raman Shift (cm^{-1})');
+ylabel('Feature Importance');
+title('Feature Importance by Raman Shift (PS Ratio Regression)');
+grid on;
+
+[sortedImp, idx] = sort(importance, 'descend');
+sortedShifts     = ramanShifts(idx);
+importanceTable  = table(sortedShifts', sortedImp', ...
+    'VariableNames', {'RamanShift', 'Importance'});
+writetable(importanceTable, 'RF_regression_feature_importance.xlsx');
+
+%% 10. Actual vs Predicted (all folds)
+figure;
+scatter(all_Y_test, all_Y_pred, 50, 'filled');
+xlabel('Actual PS Ratio (%)');
+ylabel('Predicted PS Ratio (%)');
+title('Actual vs Predicted - K-Fold (Random Forest Regression)');
+lsline;
+grid on;
+
+resultTable = table(all_Y_test, all_Y_pred, ...
+    'VariableNames', {'Actual_PS_Ratio', 'Predicted_PS_Ratio'});
+writetable(resultTable, 'RF_regression_actual_vs_predicted.csv');
+fprintf('Saved: RF_regression_actual_vs_predicted.csv\n');
