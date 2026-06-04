@@ -1,0 +1,28 @@
+clear; clc; close all;
+
+filename = "Random_PS_PMMA_PLA.csv";
+tbl = readtable(filename);
+
+featureVarNames = tbl.Properties.VariableNames(1:end-1);
+labelVarName    = tbl.Properties.VariableNames{end};
+
+X = tbl{:, featureVarNames};
+Y = tbl{:, labelVarName};
+
+if iscell(Y) || iscategorical(Y)
+    Y = grp2idx(Y);
+end
+
+[coeff, score, ~, ~, explained] = pca(X);
+
+PC1 = score(:, 1);
+PC2 = score(:, 2);
+
+pcaCoordinates = [PC1, PC2, Y];
+
+outputFilename = 'pca_coordinates.txt';
+writematrix(pcaCoordinates, outputFilename, 'Delimiter', 'tab');
+
+fprintf('PC1 Explained Variance: %.2f%%\n', explained(1));
+fprintf('PC2 Explained Variance: %.2f%%\n', explained(2));
+fprintf('Saved: %s\n', outputFilename);
